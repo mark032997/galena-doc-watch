@@ -1,0 +1,40 @@
+name: Galena Doc Watch
+
+on:
+  schedule:
+    # GitHub cron is UTC; include both DST variants so you always hit 7:00 AM & 4:30 PM America/Chicago
+    - cron: '0 12 * * *'   # 07:00 during CDT (UTC-5)
+    - cron: '0 13 * * *'   # 07:00 during CST (UTC-6)
+    - cron: '30 21 * * *'  # 16:30 during CDT
+    - cron: '30 22 * * *'  # 16:30 during CST
+  workflow_dispatch: {}     # allow manual runs
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit state.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - name: Run checker
+        env:
+          TARGET_URL: https://www.cityofgalenapark-tx.gov/DocumentCenter/Index/69
+          RECIPIENTS: mark@electriqo.pro,oscarmireles@live.com
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+        run: node check.js
+      - name: Commit state
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: 'state.json'
+          message: 'chore: update state'
+          default_author: github_actions
