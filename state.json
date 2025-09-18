@@ -1,5 +1,7 @@
 {
   "seen": [],
-  "sent": {},
+  "sent": {
+    "FORCE-1758205733466": true
+  },
   "init": true
 }
