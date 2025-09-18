@@ -1,3 +1,6 @@
+// Galena Park Document Library Watcher — includes new doc names on "Updated"
+// First line remains EXACTLY "Updated" or "Not updated" for easy filtering.
+
 import fs from "fs";
 import path from "path";
 import { chromium } from "playwright";
@@ -7,9 +10,9 @@ const TARGET_URL = process.env.TARGET_URL || "https://www.cityofgalenapark-tx.go
 const STATE_FILE = path.join(process.cwd(), "state.json");
 const RECIPIENTS = (process.env.RECIPIENTS || "").split(",").map(s => s.trim()).filter(Boolean);
 
-// Manual test controls (from workflow inputs or env vars)
+// Manual test controls
 const FORCE_SEND = String(process.env.FORCE_SEND || "false").toLowerCase() === "true";
-const FORCE_BODY = (process.env.FORCE_BODY || "").trim(); // "Updated" or "Not updated" (optional)
+const FORCE_BODY = (process.env.FORCE_BODY || "").trim(); // "Updated" or "Not updated"
 
 function makeTransport() {
   const secure = String(process.env.SMTP_SECURE ?? "true").toLowerCase() === "true";
@@ -34,15 +37,15 @@ function nowInChicago() {
   return { ymd, minutes, hhmm };
 }
 
-// Only send at ~7:00 and ~16:30 CT unless FORCE_SEND=true
+// Send only around 7:00 and 16:30 CT unless forced
 function shouldSendNow(state) {
   if (FORCE_SEND) return { go: true, key: `FORCE-${Date.now()}`, info: "Forced send" };
   const { ymd, minutes, hhmm } = nowInChicago();
   const windows = [
-    { name: "AM", target: 7 * 60 },          // 07:00
-    { name: "PM", target: 16 * 60 + 30 }     // 16:30
+    { name: "AM", target: 7 * 60 },
+    { name: "PM", target: 16 * 60 + 30 }
   ];
-  const tolerance = 8; // minutes of cron jitter allowed
+  const tolerance = 8;
   for (const w of windows) {
     if (Math.abs(minutes - w.target) <= tolerance) {
       const key = `${ymd}-${w.name}`;
@@ -69,7 +72,8 @@ function writeState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-async function fetchLinks() {
+// Fetch doc links WITH TITLES
+async function fetchDocs() {
   const browser = await chromium.launch();
   const page = await browser.newPage();
   page.setDefaultTimeout(45000);
@@ -80,23 +84,38 @@ async function fetchLinks() {
   console.log("Waiting for document links …");
   await page.waitForSelector('a[href^="/DocumentCenter/View/"], a[href*="/DocumentCenter/View/"]', { timeout: 60000 });
 
-  const hrefs = await page.$$eval('a[href*="/DocumentCenter/View/"]', as =>
-    Array.from(new Set(as.map(a => new URL(a.getAttribute("href"), location.href).href)))
+  const items = await page.$$eval('a[href*="/DocumentCenter/View/"]', as =>
+    Array.from(new Set(as.map(a => {
+      const href = new URL(a.getAttribute("href"), location.href).href;
+      // Title text: prefer anchor text; fallback to filename-ish tail
+      let title = (a.textContent || "").trim();
+      if (!title) {
+        try {
+          const parts = href.split("/");
+          title = decodeURIComponent(parts[parts.length - 1]).replace(/[-_]/g, " ");
+        } catch {
+          title = href;
+        }
+      }
+      return JSON.stringify({ href, title });
+    }))).map(s => JSON.parse(s))
   );
 
   await browser.close();
-  console.log(`Found ${hrefs.length} doc links.`);
-  return hrefs.sort();
+  console.log(`Found ${items.length} documents.`);
+  // Sort for determinism
+  items.sort((a, b) => a.href.localeCompare(b.href));
+  return items;
 }
 
 async function sendEmail(body) {
   const tx = makeTransport();
-  console.log(`Sending email to: ${RECIPIENTS.join(", ")} — body: "${body}"`);
+  console.log(`Sending email to: ${RECIPIENTS.join(", ")} — first line: "${body.split("\n")[0]}"`);
   await tx.sendMail({
     to: RECIPIENTS,
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     subject: "Document Library Monitor",
-    text: body.trim() // exactly "Updated" or "Not updated"
+    text: body
   });
 }
 
@@ -110,13 +129,13 @@ async function sendEmail(body) {
   const gate = shouldSendNow(state);
   console.log(gate.info || (gate.go ? "Send permitted" : "Send not permitted"));
 
-  // First run seed (so future comparisons work)
+  // Seed baseline if first run
   if (!state.init) {
-    const links = await fetchLinks().catch((e) => {
+    const docs = await fetchDocs().catch((e) => {
       console.error("Seed fetch failed:", e?.message || e);
       return [];
     });
-    state.seen = Array.from(new Set([...(state.seen || []), ...links])).slice(-1000);
+    state.seen = Array.from(new Set([...(state.seen || []), ...docs.map(d => d.href)])).slice(-1000);
     state.init = true;
     writeState(state);
     console.log(`Seeded baseline with ${state.seen.length} links.`);
@@ -126,7 +145,7 @@ async function sendEmail(body) {
     process.exit(0);
   }
 
-  // If FORCE_BODY provided, just send that now (useful for verifying SMTP works)
+  // Optional manual test body
   if (FORCE_BODY === "Updated" || FORCE_BODY === "Not updated") {
     await sendEmail(FORCE_BODY);
     if (gate.key) state.sent[gate.key] = true;
@@ -134,10 +153,10 @@ async function sendEmail(body) {
     process.exit(0);
   }
 
-  // Normal run: compute verdict
-  let links = [];
+  // Normal run
+  let docs = [];
   try {
-    links = await fetchLinks();
+    docs = await fetchDocs();
   } catch (e) {
     console.error("Fetch failed:", e.message || e);
     await sendEmail("Not updated");   // fail safe
@@ -146,26 +165,35 @@ async function sendEmail(body) {
     process.exit(0);
   }
 
-  if (links.length === 0) {
-    console.warn("Zero links after fetch; sending Not updated (baseline unchanged).");
+  if (docs.length === 0) {
+    console.warn("Zero docs after fetch; sending Not updated (baseline unchanged).");
     await sendEmail("Not updated");
     if (gate.key) state.sent[gate.key] = true;
     writeState(state);
     process.exit(0);
   }
 
-  const seen = new Set(state.seen || []);
-  const newOnes = links.filter(u => !seen.has(u));
-  console.log(`Baseline size: ${state.seen.length}. New links this run: ${newOnes.length}.`);
+  const seenSet = new Set(state.seen || []);
+  const newDocs = docs.filter(d => !seenSet.has(d.href));
+  console.log(`Baseline size: ${state.seen.length}. New docs: ${newDocs.length}.`);
 
-  const verdict = newOnes.length > 0 ? "Updated" : "Not updated";
-  await sendEmail(verdict);
-
-  if (newOnes.length > 0) {
-    state.seen = Array.from(new Set([...(state.seen || []), ...links])).slice(-1000);
+  if (newDocs.length === 0) {
+    await sendEmail("Not updated");
+    if (gate.key) state.sent[gate.key] = true;
+    writeState(state);
+    process.exit(0);
   }
+
+  // Compose body: "Updated" + list of new titles (limit to 25 lines just in case)
+  const list = newDocs.slice(0, 25).map(d => `- ${d.title}`).join("\n");
+  const more = newDocs.length > 25 ? `\n(+${newDocs.length - 25} more)` : "";
+  const body = `Updated\n\nNew documents:\n${list}${more}`;
+
+  await sendEmail(body);
+
+  // Merge into baseline
+  state.seen = Array.from(new Set([...(state.seen || []), ...docs.map(d => d.href)])).slice(-1000);
   if (gate.key) state.sent[gate.key] = true;
   state.init = true;
   writeState(state);
 })();
-
