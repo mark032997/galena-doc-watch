@@ -2,19 +2,29 @@ name: Galena Doc Watch
 
 on:
   schedule:
-    # UTC times that cover CST/CDT so you always hit 7:00 AM & 4:30 PM America/Chicago
-    - cron: '0 12 * * *'   # 07:00 during CDT (UTC-5)
-    - cron: '0 13 * * *'   # 07:00 during CST (UTC-6)
-    - cron: '30 21 * * *'  # 16:30 during CDT
-    - cron: '30 22 * * *'  # 16:30 during CST
+    # Central Time slots (both DST and Standard):
+    # 08:00 CT  -> 13:00 UTC (CDT), 14:00 UTC (CST)
+    - cron: '0 13 * * *'   # 08:00 during CDT (UTC-5)
+    - cron: '0 14 * * *'   # 08:00 during CST (UTC-6)
+    # 10:00 CT  -> 15:00 / 16:00 UTC
+    - cron: '0 15 * * *'   # 10:00 CDT
+    - cron: '0 16 * * *'   # 10:00 CST
+    # 12:00 CT  -> 17:00 / 18:00 UTC
+    - cron: '0 17 * * *'   # 12:00 CDT
+    - cron: '0 18 * * *'   # 12:00 CST
+    # 14:00 CT  -> 19:00 / 20:00 UTC
+    - cron: '0 19 * * *'   # 14:00 CDT
+    - cron: '0 20 * * *'   # 14:00 CST
+    # 16:00 CT  -> 21:00 / 22:00 UTC
+    - cron: '0 21 * * *'   # 16:00 CDT
+    - cron: '0 22 * * *'   # 16:00 CST
+    # 17:00 CT  -> 22:00 / 23:00 UTC
+    - cron: '0 22 * * *'   # 17:00 CDT
+    - cron: '0 23 * * *'   # 17:00 CST
   workflow_dispatch:
     inputs:
-      force_send:
-        description: 'Send now (true/false)?'
-        required: false
-        default: 'false'
       force_body:
-        description: 'Optional: Updated or Not updated'
+        description: 'Optional: Updated or Not updated (manual test)'
         required: false
         default: ''
 
@@ -40,7 +50,6 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          FORCE_SEND: ${{ github.event.inputs.force_send || 'false' }}
           FORCE_BODY: ${{ github.event.inputs.force_body || '' }}
         run: node check.js
       - name: Commit state
@@ -49,4 +58,3 @@ jobs:
           add: 'state.json'
           message: 'chore: update state'
           default_author: github_actions
-
