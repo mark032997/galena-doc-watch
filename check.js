@@ -1,7 +1,6 @@
-// Galena Park Document Library Watcher — targets the left tree:
-// Agendas -> 2025 and Minutes -> 2025
+// Galena Park Document Library Watcher — Agendas/2025 + Minutes/2025
 // Sends EVERY scheduled run. First line is EXACTLY "Updated" or "Not updated".
-// If "Updated", it lists the new document titles (with [Agendas] / [Minutes] tags).
+// On "Updated", lists new document titles (tagged by [Agendas]/[Minutes]).
 
 import fs from "fs";
 import path from "path";
@@ -10,12 +9,15 @@ import nodemailer from "nodemailer";
 
 const BASE_URL = process.env.TARGET_URL || "https://www.cityofgalenapark-tx.gov/DocumentCenter/Index/69";
 const STATE_FILE = path.join(process.cwd(), "state.json");
+
+// Recipients come from RECIPIENTS env; set to only mark@electriqo.pro in workflow.
 const RECIPIENTS = (process.env.RECIPIENTS || "").split(",").map(s => s.trim()).filter(Boolean);
 
-// Optional: manual test body
-const FORCE_BODY = (process.env.FORCE_BODY || "").trim(); // "Updated" or "Not updated"
+// Optional helpers for testing/maintenance
+const FORCE_BODY = (process.env.FORCE_BODY || "").trim();                 // "Updated" or "Not updated"
 const RESET_BASELINE = String(process.env.RESET_BASELINE || "false").toLowerCase() === "true";
 
+// Exact branches to scrape
 const CATEGORIES = ["Agendas", "Minutes"];
 const YEAR = "2025";
 
@@ -46,23 +48,20 @@ function writeState(state) {
 
 async function gotoAndSettle(page, url) {
   await page.goto(url, { waitUntil: "domcontentloaded" });
-  // CivicEngage populates via JS; a short settle helps before querying
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(600); // allow JS to populate tree/table
 }
 
-/** Click a link by its visible text, case-insensitive, preferring left tree if present. */
 async function clickByText(page, text) {
   const ci = new RegExp(`^\\s*${text}\\s*$`, "i");
 
-  // Try inside likely left-tree containers first
-  const leftCandidates = [
-    'aside',                            // many CivicEngage themes use <aside> for the tree
-    '#leftColumn, .leftColumn',         // common ids/classes
-    '.document-center-tree, .tree',     // generic tree containers
-    'nav[role="navigation"]'            // nav container
+  // Prefer left tree areas
+  const leftScopes = [
+    'aside',
+    '#leftColumn', '.leftColumn',
+    '.document-center-tree', '.tree',
+    'nav[role="navigation"]'
   ];
-
-  for (const sel of leftCandidates) {
+  for (const sel of leftScopes) {
     const scope = page.locator(sel);
     if (await scope.count()) {
       const link = scope.getByRole('link', { name: ci });
@@ -75,7 +74,7 @@ async function clickByText(page, text) {
     }
   }
 
-  // Fallback: anywhere on the page
+  // Anywhere
   const any = page.getByRole('link', { name: ci });
   if (await any.count()) {
     await any.first().click();
@@ -84,7 +83,7 @@ async function clickByText(page, text) {
     return;
   }
 
-  // Last resort: partial text search
+  // Partial fallback
   const partial = page.locator('a', { hasText: text });
   if (await partial.count()) {
     await partial.first().click();
@@ -96,17 +95,11 @@ async function clickByText(page, text) {
   throw new Error(`Could not find link "${text}"`);
 }
 
-/** Ensure the center table is present (has "Display Name" header or at least one View link). */
 async function waitForDocumentTable(page) {
-  try {
-    await page.waitForSelector('th:has-text("Display Name")', { timeout: 4000 });
-  } catch {
-    // header might differ; wait for any document link instead
-  }
+  try { await page.waitForSelector('th:has-text("Display Name")', { timeout: 4000 }); } catch {}
   await page.waitForSelector('a[href*="/DocumentCenter/View/"]', { timeout: 15000 });
 }
 
-/** Collect all doc rows on the current page (Display Name column links). */
 async function collectDocsOnCurrentPage(page) {
   await waitForDocumentTable(page);
   const items = await page.$$eval('a[href*="/DocumentCenter/View/"]', as =>
@@ -117,9 +110,7 @@ async function collectDocsOnCurrentPage(page) {
         try {
           const parts = href.split("/");
           title = decodeURIComponent(parts[parts.length - 1]).replace(/[-_]/g, " ");
-        } catch {
-          title = href;
-        }
+        } catch { title = href; }
       }
       return JSON.stringify({ href, title });
     }))).map(s => JSON.parse(s))
@@ -127,7 +118,6 @@ async function collectDocsOnCurrentPage(page) {
   return items;
 }
 
-/** Click "Next" if pagination exists; returns true if advanced. */
 async function clickNextIfAny(page) {
   const candidates = [
     page.getByRole("link", { name: /^\s*Next\s*$/i }),
@@ -151,38 +141,29 @@ async function clickNextIfAny(page) {
   return false;
 }
 
-/** Scrape one branch in the tree (e.g., "Minutes" -> "2025"). */
 async function scrapeBranch(page, category, year) {
-  // Always start from the index (safest with this CMS)
   await gotoAndSettle(page, BASE_URL);
-
-  // Click left tree: category then year
   await clickByText(page, category);
   await clickByText(page, year);
 
-  // Now harvest table rows, including pagination
   let docs = [];
   let guard = 0;
   while (true) {
     const pageDocs = await collectDocsOnCurrentPage(page);
     docs.push(...pageDocs);
 
-    // If there's no next, stop
     const advanced = await clickNextIfAny(page);
     if (!advanced) break;
 
-    // Safety to avoid infinite loops if "Next" doesn't change page
     guard++;
-    if (guard > 50) break;
+    if (guard > 50) break; // safety
   }
 
-  // Dedup by href
   const map = new Map();
   for (const d of docs) if (!map.has(d.href)) map.set(d.href, d);
   return Array.from(map.values()).sort((a, b) => a.href.localeCompare(b.href));
 }
 
-/** Scrape both Agendas/2025 and Minutes/2025 */
 async function fetchAllDocs() {
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -202,7 +183,6 @@ async function fetchAllDocs() {
 
   await browser.close();
 
-  // Final dedup
   const map = new Map();
   for (const d of all) if (!map.has(d.href)) map.set(d.href, d);
   return Array.from(map.values()).sort((a, b) => a.href.localeCompare(b.href));
@@ -264,7 +244,6 @@ async function sendEmail(body) {
     await sendEmail(body);
   }
 
-  // Update baseline
   state.seen = Array.from(new Set([...(state.seen || []), ...docs.map(d => d.href)])).slice(-2000);
   state.init = true;
   writeState(state);
